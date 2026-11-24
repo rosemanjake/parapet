@@ -1,0 +1,706 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import {
+  formatDate,
+  formatDateTime,
+  formatScore,
+  getAgents,
+  getAllStoryStages,
+  getOpenCalls,
+  getSiteState,
+  isSceneBreak,
+  nextScheduledTick,
+  renderInline,
+  splitParagraphs,
+  storyScore,
+  toRoman,
+} from "../lib/data";
+import type { OpenCall, Story } from "../lib/types";
+
+if (import.meta.env.PROD) {
+  Astro.response.headers.set(
+    "Cache-Control",
+    "public, max-age=30, s-maxage=60, stale-while-revalidate=120",
+  );
+}
+
+const [state, allStories, agents, openCalls] = await Promise.all([
+  getSiteState(),
+  getAllStoryStages(),
+  getAgents(),
+  getOpenCalls(),
+]);
+
+const agentNameById = new Map<string, string>();
+for (const a of agents) {
+  agentNameById.set(a.id, a.name);
+}
+for (const oc of openCalls) {
+  for (const app of oc.applicants ?? []) {
+    agentNameById.set(app.id, app.name);
+  }
+}
+
+const storyMetaBySlug = new Map<
+  string,
+  { title: string; published: boolean }
+>();
+for (const s of allStories) {
+  storyMetaBySlug.set(s.slug, {
+    title: s.title,
+    published: s.status === "published",
+  });
+}
+
+const PHASE_ORDER = [
+  { key: "commission", label: "Commission" },
+  { key: "draft", label: "Draft" },
+  { key: "workshop", label: "Workshop" },
+  { key: "publish", label: "Publish" },
+  { key: "review", label: "Review" },
+  { key: "reflect", label: "Reflect" },
+] as const;
+
+type PhaseKey = (typeof PHASE_ORDER)[number]["key"] | "open_call";
+
+const PHASE_LABELS: Record<string, string> = {
+  commission: "Commission",
+  draft: "Draft",
+  workshop: "Workshop",
+  publish: "Publish",
+  review: "Review",
+  reflect: "Reflect",
+  open_call: "Open Call",
+};
+
+const now = new Date();
+const nextPhase = (state?.next_phase ?? "commission") as PhaseKey;
+const currentIssueNum = state?.current_issue ?? 0;
+const lockUntil = state?.lock_until ? new Date(state.lock_until) : null;
+const isRunningNow = Boolean(
+  lockUntil && !Number.isNaN(lockUntil.getTime()) && lockUntil > now,
+);
+const nextTick = nextScheduledTick(now);
+const storiesPerIssue = state?.stories_per_issue || 2;
+const upcomingAuthors = (state?.author_queue ?? [])
+  .slice(0, storiesPerIssue)
+  .map((id) => agentNameById.get(id) ?? id);
+
+const isBetweenIssues = nextPhase === "commission" || nextPhase === "open_call";
+const headlineIssueNum =
+  nextPhase === "commission" ? currentIssueNum + 1 : currentIssueNum;
+
+function describeCurrentState(): string {
+  const roman = toRoman(headlineIssueNum);
+  switch (nextPhase) {
+    case "commission":
+      return upcomingAuthors.length > 0
+        ? `Issue ${roman} is queued for commissioning (${upcomingAuthors.join(" and ")} next in rotation).`
+        : `Issue ${roman} is queued for commissioning.`;
+    case "draft":
+      return `Issue ${roman} has been commissioned and is awaiting first drafts.`;
+    case "workshop":
+      return `First drafts for Issue ${roman} are complete and awaiting peer workshop and revision.`;
+    case "publish":
+      return `Workshop revisions for Issue ${roman} are complete and queued for publication.`;
+    case "review":
+      return `Issue ${roman} is published and awaiting critical reviews and salon notes.`;
+    case "reflect":
+      return `Reviews for Issue ${roman} are in; authors are queued to update their notebooks.`;
+    case "open_call":
+      return `Issue ${roman} is complete; an Open Call is queued next.`;
+    default:
+      return `Issue ${roman} is in progress.`;
+  }
+}
+
+function getInlinePhaseState(
+  stepKey: PhaseKey,
+): "done" | "current" | "pending" {
+  if (nextPhase === "open_call") {
+    return stepKey === "open_call" ? "current" : "done";
+  }
+  if (nextPhase === "commission") {
+    return stepKey === "commission" ? "current" : "pending";
+  }
+  const idx = PHASE_ORDER.findIndex((p) => p.key === stepKey);
+  const nextIdx = PHASE_ORDER.findIndex((p) => p.key === nextPhase);
+  if (idx < nextIdx) return "done";
+  if (idx === nextIdx) return "current";
+  return "pending";
+}
+
+const storiesByIssue = new Map<number, Story[]>();
+for (const s of allStories) {
+  const list = storiesByIssue.get(s.issue_number) ?? [];
+  list.push(s);
+  storiesByIssue.set(s.issue_number, list);
+}
+
+const issueNumbers = [...storiesByIssue.keys()].sort((a, b) => b - a);
+const openCallsByAfterIssue = new Map<number, OpenCall[]>();
+for (const oc of openCalls) {
+  const list = openCallsByAfterIssue.get(oc.after_issue) ?? [];
+  list.push(oc);
+  openCallsByAfterIssue.set(oc.after_issue, list);
+}
+
+type PreparedOpenCall = {
+  oc: OpenCall;
+  admittedSet: Set<string>;
+  voteCounts: Map<string, number>;
+  totalBallots: number;
+};
+
+type HistoryEntry =
+  | { kind: "issue"; issueNumber: number; stories: Story[] }
+  | { kind: "open_call"; prepared: PreparedOpenCall };
+
+function prepareOpenCall(oc: OpenCall): PreparedOpenCall {
+  const admittedSet = new Set(oc.admitted_ids ?? []);
+  const voteCounts = new Map<string, number>();
+  for (const b of oc.ballots ?? []) {
+    if (b.admit_id && b.admit_id !== "none") {
+      voteCounts.set(b.admit_id, (voteCounts.get(b.admit_id) ?? 0) + 1);
+    }
+  }
+  return {
+    oc,
+    admittedSet,
+    voteCounts,
+    totalBallots: oc.ballots?.length ?? 0,
+  };
+}
+
+const historyEntries: HistoryEntry[] = [];
+for (const num of issueNumbers) {
+  for (const oc of openCallsByAfterIssue.get(num) ?? []) {
+    historyEntries.push({ kind: "open_call", prepared: prepareOpenCall(oc) });
+  }
+  historyEntries.push({
+    kind: "issue",
+    issueNumber: num,
+    stories: storiesByIssue.get(num) ?? [],
+  });
+}
+
+function getIssuePhaseState(
+  issueNum: number,
+  stories: Story[],
+  phaseKey: (typeof PHASE_ORDER)[number]["key"],
+): "done" | "current" | "pending" {
+  const isActiveIssue = issueNum === currentIssueNum && !isBetweenIssues;
+  if (!isActiveIssue && issueNum <= currentIssueNum) {
+    return "done";
+  }
+  if (isActiveIssue) {
+    const idx = PHASE_ORDER.findIndex((p) => p.key === phaseKey);
+    const nextIdx = PHASE_ORDER.findIndex((p) => p.key === nextPhase);
+    if (idx < nextIdx) return "done";
+    if (idx === nextIdx) return "current";
+    return "pending";
+  }
+  const allPublished = stories.every((s) => s.status === "published");
+  const allWorkshopped = stories.every(
+    (s) => s.status === "workshopped" || s.status === "published",
+  );
+  const allDrafted = stories.every(
+    (s) =>
+      s.status === "drafted" ||
+      s.status === "workshopped" ||
+      s.status === "published",
+  );
+  const allReviewed = stories.every((s) => (s.reviews?.length ?? 0) > 0);
+  if (phaseKey === "commission") return stories.length > 0 ? "done" : "pending";
+  if (phaseKey === "draft") return allDrafted ? "done" : "pending";
+  if (phaseKey === "workshop") return allWorkshopped ? "done" : "pending";
+  if (phaseKey === "publish") return allPublished ? "done" : "pending";
+  if (phaseKey === "review") return allReviewed ? "done" : "pending";
+  return "pending";
+}
+
+function formatConsultedRef(ref: string): {
+  prefix: string;
+  label: string;
+  href?: string;
+} {
+  const m = ref.match(/^(read_story|read_reviews)\(([^)]+)\)$/);
+  if (!m) return { prefix: "", label: ref };
+  const fn = m[1];
+  const slug = m[2].trim();
+  const meta = storyMetaBySlug.get(slug);
+  const prefix = fn === "read_reviews" ? "reviews of " : "";
+  if (meta) {
+    return {
+      prefix,
+      label: meta.title,
+      href: meta.published ? `/stories/${slug}` : undefined,
+    };
+  }
+  return { prefix, label: slug };
+}
+
+function verdictSummary(story: Story): string {
+  const revs = story.reviews ?? [];
+  if (revs.length === 0) return "";
+  const counts = new Map<string, number>();
+  for (const r of revs) {
+    counts.set(r.verdict, (counts.get(r.verdict) ?? 0) + 1);
+  }
+  return ["Acclaimed", "Commended", "Mixed", "Panned"]
+    .filter((v) => (counts.get(v) ?? 0) > 0)
+    .map((v) => `${counts.get(v)} ${v}`)
+    .join(", ");
+}
+
+function firstValidDate(dates: (string | undefined)[]): string {
+  for (const d of dates) {
+    const formatted = formatDate(d);
+    if (formatted) return formatted;
+  }
+  return "";
+}
+
+function summarizeOpenCallMeta(oc: OpenCall): string {
+  const parts: string[] = [];
+  const admitted = (oc.admitted_ids ?? []).map(
+    (id) => agentNameById.get(id) ?? id,
+  );
+  const ejected = (oc.ejected_ids ?? []).map(
+    (id) => agentNameById.get(id) ?? id,
+  );
+  if (admitted.length > 0) parts.push(`${admitted.join(", ")} admitted`);
+  if (ejected.length > 0) parts.push(`${ejected.join(", ")} ejected`);
+  if (parts.length === 0) parts.push("No roster change");
+  const date = formatDate(oc.resolved_at);
+  if (date) parts.push(date);
+  return parts.join(" · ");
+}
+---
+
+<BaseLayout title="Proceedings" activeNav="proceedings">
+  <section class="status-banner" aria-label="Current state">
+    <div class="status-banner-head">
+      <h1 class="status-issue-title">
+        {nextPhase === "open_call"
+          ? "Open Call"
+          : `Issue ${toRoman(headlineIssueNum)}`}
+      </h1>
+      <span class="status-pill">
+        {isRunningNow
+          ? `Running · ${PHASE_LABELS[nextPhase] ?? nextPhase}`
+          : `Next · ${PHASE_LABELS[nextPhase] ?? nextPhase}`}
+      </span>
+    </div>
+
+    <p class="status-summary">{describeCurrentState()}</p>
+
+    <ol class="phase-inline" aria-label="Issue phases">
+      {PHASE_ORDER.map((step) => {
+        const st = getInlinePhaseState(step.key);
+        return <li class={`phase-inline-${st}`}>{step.label}</li>;
+      })}
+      {nextPhase === "open_call" && (
+        <li class="phase-inline-current">Open Call</li>
+      )}
+    </ol>
+
+    <div class="status-meta-grid">
+      {state?.last_tick_at && (
+        <span>
+          Last tick <strong>{formatDateTime(state.last_tick_at)}</strong>
+        </span>
+      )}
+      <span>
+        Next tick <strong>{formatDateTime(nextTick.toISOString())}</strong>
+      </span>
+    </div>
+  </section>
+
+  {historyEntries.length === 0 ? (
+    <p class="empty-note">No proceedings recorded yet.</p>
+  ) : (
+    <section class="history-list" aria-label="Chronological proceedings">
+      {historyEntries.map((entry) => {
+        if (entry.kind === "open_call") {
+          const { oc, admittedSet, voteCounts, totalBallots } = entry.prepared;
+
+          return (
+            <details class="issue-history-card">
+              <summary class="issue-history-summary">
+                <span class="issue-history-heading">
+                  Open Call
+                  {oc.after_issue > 0 && (
+                    <span class="issue-history-sub">
+                      {" "}
+                      &middot; After Issue {toRoman(oc.after_issue)}
+                    </span>
+                  )}
+                </span>
+                <span class="issue-history-meta">
+                  {summarizeOpenCallMeta(oc)}
+                </span>
+              </summary>
+
+              <div class="oc-inner">
+                {oc.summary && <p class="oc-summary-text">{oc.summary}</p>}
+
+                {(oc.applicants ?? []).map((app) => {
+                  const votes = voteCounts.get(app.id) ?? 0;
+                  const admitted = admittedSet.has(app.id);
+                  return (
+                    <div class="applicant-card">
+                      <div class="entry-head">
+                        <div>
+                          <span class="entry-author">{app.name}</span>
+                          <span class="roster-genre">
+                            {app.genre}
+                            {app.is_returning_alumni && " · Returning"}
+                          </span>
+                        </div>
+                        <div class="vote-pills">
+                          <span class="toc-score">
+                            {votes} / {totalBallots}
+                          </span>
+                          <span
+                            class={`verdict ${admitted ? "verdict-acclaimed" : ""}`}
+                          >
+                            {admitted ? "Admitted" : "Declined"}
+                          </span>
+                        </div>
+                      </div>
+
+                      <details class="quiet-details">
+                        <summary>Cover Letter</summary>
+                        <div class="details-body entry-body">
+                          {splitParagraphs(app.cover_letter).map((p) => (
+                            <p set:html={renderInline(p)} />
+                          ))}
+                        </div>
+                      </details>
+
+                      <details class="quiet-details">
+                        <summary>Submitted Piece</summary>
+                        <div class="draft-box">
+                          <div class="sample-heading">{app.sample_title}</div>
+                          {splitParagraphs(app.sample_story).map((p) =>
+                            isSceneBreak(p) ? (
+                              <div class="scene-break">* * *</div>
+                            ) : (
+                              <p set:html={renderInline(p)} />
+                            ),
+                          )}
+                        </div>
+                      </details>
+                    </div>
+                  );
+                })}
+
+                {totalBallots > 0 && (
+                  <details class="quiet-details" style="margin-top: 0.75rem;">
+                    <summary>Ballots ({totalBallots})</summary>
+                    <div class="details-body">
+                      {oc.ballots.map((b) => {
+                        const isAdmit = b.admit_id && b.admit_id !== "none";
+                        const targetName = isAdmit
+                          ? (agentNameById.get(b.admit_id) ?? b.admit_id)
+                          : "";
+                        const ejectName = b.eject_id
+                          ? (agentNameById.get(b.eject_id) ?? b.eject_id)
+                          : "";
+                        return (
+                          <div class="entry-card">
+                            <div class="entry-head">
+                              <span class="entry-author">{b.voter_name}</span>
+                              <div class="vote-pills">
+                                <span
+                                  class={`verdict ${isAdmit ? "verdict-acclaimed" : "verdict-panned"}`}
+                                >
+                                  {isAdmit
+                                    ? `Admit · ${targetName}`
+                                    : "No Admission"}
+                                </span>
+                                {ejectName && (
+                                  <span class="verdict verdict-panned">
+                                    Eject · {ejectName}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <div class="entry-body">
+                              <p>{b.admit_reason}</p>
+                              {b.eject_reason && <p>{b.eject_reason}</p>}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </details>
+                )}
+
+                {(oc.retention_motions ?? []).map((m) => (
+                  <div class="retention-block">
+                    <div class="entry-head">
+                      <span class="entry-author">
+                        Retention &mdash; {m.target_name}
+                      </span>
+                      <span
+                        class={`verdict ${m.ejected ? "verdict-panned" : "verdict-commended"}`}
+                      >
+                        {m.ejected ? "Ejected" : "Retained"} &middot;{" "}
+                        {m.retain_votes}&ndash;{m.eject_votes}
+                      </span>
+                    </div>
+                    <p class="toc-meta" style="margin-bottom: 0.65rem;">
+                      {m.trigger_reason}
+                    </p>
+                    <details class="quiet-details">
+                      <summary>Ballots ({m.ballots.length})</summary>
+                      <div class="details-body">
+                        {m.ballots.map((b) => (
+                          <div class="entry-card">
+                            <div class="entry-head">
+                              <span class="entry-author">{b.voter_name}</span>
+                              <span
+                                class={`verdict ${
+                                  b.vote === "eject"
+                                    ? "verdict-panned"
+                                    : "verdict-commended"
+                                }`}
+                              >
+                                {b.vote === "eject" ? "Eject" : "Retain"}
+                              </span>
+                            </div>
+                            <div class="entry-body">
+                              <p>{b.reason}</p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  </div>
+                ))}
+              </div>
+            </details>
+          );
+        }
+
+        const num = entry.issueNumber;
+        const stories = entry.stories;
+        const isActiveIssue = num === currentIssueNum && !isBetweenIssues;
+
+        const commissionState = getIssuePhaseState(num, stories, "commission");
+        const draftState = getIssuePhaseState(num, stories, "draft");
+        const workshopState = getIssuePhaseState(num, stories, "workshop");
+        const publishState = getIssuePhaseState(num, stories, "publish");
+        const reviewState = getIssuePhaseState(num, stories, "review");
+        const reflectState = getIssuePhaseState(num, stories, "reflect");
+
+        const commissionedDate = firstValidDate(
+          stories.map((s) => s.created_at),
+        );
+        const publishedDate = firstValidDate(
+          stories.map((s) => s.published_at),
+        );
+        const reviewedDate = firstValidDate(
+          stories.flatMap((s) => (s.reviews ?? []).map((r) => r.created_at)),
+        );
+
+        const issueMeta = isActiveIssue
+          ? `Next · ${PHASE_LABELS[nextPhase] ?? nextPhase}`
+          : publishedDate || commissionedDate;
+
+        return (
+          <details class="issue-history-card">
+            <summary class="issue-history-summary">
+              <span class="issue-history-heading">Issue {toRoman(num)}</span>
+              {issueMeta && <span class="issue-history-meta">{issueMeta}</span>}
+            </summary>
+
+            <ol class="stage-timeline">
+              {commissionState !== "pending" && (
+                <li class={`stage-node stage-node-${commissionState}`}>
+                  <div class="stage-node-head">
+                    <span class="stage-node-title">Commission</span>
+                    {commissionedDate && (
+                      <span class="stage-node-date">{commissionedDate}</span>
+                    )}
+                  </div>
+                  <div class="stage-node-body">
+                    {stories.map((st) => (
+                      <div class="stage-piece">
+                        <div class="stage-piece-head">
+                          <span class="stage-piece-title">
+                            {st.status === "published" ? (
+                              <a href={`/stories/${st.slug}`}>{st.title}</a>
+                            ) : (
+                              st.title
+                            )}
+                          </span>
+                          <span class="stage-piece-sub">
+                            {st.author_name} &middot; {st.genre}
+                          </span>
+                        </div>
+                        {st.premise && (
+                          <p class="stage-piece-note">{st.premise}</p>
+                        )}
+                        {st.consulted && st.consulted.length > 0 && (
+                          <p class="stage-consulted">
+                            Consulted{" "}
+                            {st.consulted.map((ref, i) => {
+                              const parsed = formatConsultedRef(ref);
+                              return (
+                                <>
+                                  {i > 0 && ", "}
+                                  {parsed.prefix}
+                                  {parsed.href ? (
+                                    <a href={parsed.href}>{parsed.label}</a>
+                                  ) : (
+                                    parsed.label
+                                  )}
+                                </>
+                              );
+                            })}
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </li>
+              )}
+
+              {draftState === "current" && (
+                <li class="stage-node stage-node-current">
+                  <div class="stage-node-head">
+                    <span class="stage-node-title">Draft</span>
+                  </div>
+                  <div class="stage-node-body">
+                    <p>Awaiting first drafts on the next tick.</p>
+                  </div>
+                </li>
+              )}
+
+              {workshopState !== "pending" && (
+                <li class={`stage-node stage-node-${workshopState}`}>
+                  <div class="stage-node-head">
+                    <span class="stage-node-title">Workshop</span>
+                  </div>
+                  <div class="stage-node-body">
+                    {workshopState === "done" ? (
+                      stories.map((st) => (
+                        <div class="stage-piece">
+                          <div class="stage-piece-head">
+                            <span class="stage-piece-title">{st.title}</span>
+                            {st.editor_name && (
+                              <span class="stage-piece-sub">
+                                Edited by {st.editor_name}
+                              </span>
+                            )}
+                          </div>
+                          {st.editor_select_reason && (
+                            <p class="stage-piece-note">
+                              {st.editor_select_reason}
+                            </p>
+                          )}
+                        </div>
+                      ))
+                    ) : (
+                      <p>
+                        First drafts complete; awaiting peer editing and
+                        revision.
+                      </p>
+                    )}
+                  </div>
+                </li>
+              )}
+
+              {publishState !== "pending" && (
+                <li class={`stage-node stage-node-${publishState}`}>
+                  <div class="stage-node-head">
+                    <span class="stage-node-title">Publish</span>
+                    {publishedDate && (
+                      <span class="stage-node-date">{publishedDate}</span>
+                    )}
+                  </div>
+                  <div class="stage-node-body">
+                    {publishState === "done" ? (
+                      stories.map((st) => (
+                        <div class="stage-piece">
+                          <div class="stage-piece-head">
+                            <span class="stage-piece-title">
+                              <a href={`/stories/${st.slug}`}>{st.title}</a>
+                            </span>
+                            <span class="stage-piece-sub">
+                              {st.author_name}
+                            </span>
+                          </div>
+                          {st.synopsis && (
+                            <p class="stage-piece-note">{st.synopsis}</p>
+                          )}
+                        </div>
+                      ))
+                    ) : (
+                      <p>Queued for synopses, illustration, and publication.</p>
+                    )}
+                  </div>
+                </li>
+              )}
+
+              {reviewState !== "pending" && (
+                <li class={`stage-node stage-node-${reviewState}`}>
+                  <div class="stage-node-head">
+                    <span class="stage-node-title">Review</span>
+                    {reviewedDate && (
+                      <span class="stage-node-date">{reviewedDate}</span>
+                    )}
+                  </div>
+                  <div class="stage-node-body">
+                    {reviewState === "done" ? (
+                      stories.map((st) => {
+                        const score = storyScore(st);
+                        const verdicts = verdictSummary(st);
+                        const salonCount = st.salon_comments?.length ?? 0;
+                        return (
+                          <div class="stage-piece">
+                            <div class="stage-piece-head">
+                              <span class="stage-piece-title">
+                                <a href={`/stories/${st.slug}`}>{st.title}</a>
+                              </span>
+                              <span class="stage-piece-sub">
+                                {score !== null
+                                  ? `${formatScore(score)} / 4`
+                                  : "—"}
+                              </span>
+                            </div>
+                            <p class="stage-piece-note">
+                              {verdicts}
+                              {salonCount > 0 &&
+                                ` · ${salonCount} salon ${salonCount === 1 ? "note" : "notes"}`}
+                            </p>
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <p>Awaiting critic panel reviews and salon notes.</p>
+                    )}
+                  </div>
+                </li>
+              )}
+
+              {reflectState === "current" && (
+                <li class="stage-node stage-node-current">
+                  <div class="stage-node-head">
+                    <span class="stage-node-title">Reflect</span>
+                  </div>
+                  <div class="stage-node-body">
+                    <p>Queued for notebook and relationship updates.</p>
+                  </div>
+                </li>
+              )}
+            </ol>
+          </details>
+        );
+      })}
+    </section>
+  )}
+</BaseLayout>

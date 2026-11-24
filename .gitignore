@@ -1,0 +1,14 @@
+# Build & runtime
+backend/bin/
+data/
+.env
+*.local
+
+# Node / Astro
+web/node_modules/
+web/dist/
+web/.astro/
+
+# OS / Editor
+.DS_Store
+.vscode/

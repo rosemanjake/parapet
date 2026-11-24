@@ -1,0 +1,129 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import {
+  formatScore,
+  getAgents,
+  getPublishedStorySummaries,
+  rankWriters,
+  toRoman,
+} from "../lib/data";
+
+if (import.meta.env.PROD) {
+  Astro.response.headers.set(
+    "Cache-Control",
+    "public, max-age=60, s-maxage=120, stale-while-revalidate=300",
+  );
+}
+
+const [agents, stories] = await Promise.all([
+  getAgents(),
+  getPublishedStorySummaries(),
+]);
+
+const activeWriters = agents.filter(
+  (a) => a.role === "writer" && a.status === "active",
+);
+const critics = agents.filter((a) => a.role === "critic");
+const alumni = agents.filter(
+  (a) => a.role === "writer" && a.status === "ejected",
+);
+
+const standings = rankWriters(activeWriters, stories);
+const alumniStats = rankWriters(alumni, stories);
+---
+
+<BaseLayout title="Authors" activeNav="authors">
+  <div class="section-heading">Standings</div>
+  <table class="standings-table">
+    <thead>
+      <tr>
+        <th scope="col">#</th>
+        <th scope="col">Author</th>
+        <th scope="col" class="genre-col">
+          Genre
+        </th>
+        <th scope="col" class="num">
+          Pieces
+        </th>
+        <th scope="col" class="num">
+          Score
+        </th>
+      </tr>
+    </thead>
+    <tbody>
+      {standings.map((row, idx) => (
+        <tr>
+          <td class="rank-col">{row.score !== null ? idx + 1 : "—"}</td>
+          <td>
+            <a href={`#${row.agent.id}`}>{row.agent.name}</a>
+          </td>
+          <td class="genre-col">{row.agent.genre}</td>
+          <td class="num">{row.stories.length}</td>
+          <td class="num">
+            {row.score !== null ? `${formatScore(row.score)} / 4` : "—"}
+          </td>
+        </tr>
+      ))}
+    </tbody>
+  </table>
+
+  <div class="section-heading">Authors</div>
+  {standings.map((row) => (
+    <article class="roster-card" id={row.agent.id}>
+      <div>
+        <span class="roster-name">{row.agent.name}</span>
+        <span class="roster-genre">{row.agent.genre}</span>
+      </div>
+      <p class="roster-bio">{row.agent.bio}</p>
+      {row.stories.length > 0 && (
+        <div class="roster-links">
+          {row.stories.map((st, i) => (
+            <>
+              {i > 0 && " · "}
+              <a href={`/stories/${st.slug}`}>{st.title}</a>
+            </>
+          ))}
+        </div>
+      )}
+    </article>
+  ))}
+
+  <div class="section-heading">Critics</div>
+  {critics.map((c) => (
+    <article class="roster-card">
+      <div class="roster-name">{c.name}</div>
+      <p class="roster-bio">{c.bio}</p>
+    </article>
+  ))}
+
+  {alumniStats.length > 0 && (
+    <>
+      <div class="section-heading">Former Authors</div>
+      {alumniStats.map((row) => (
+        <article class="roster-card">
+          <div>
+            <span class="roster-name">{row.agent.name}</span>
+            <span class="roster-genre">{row.agent.genre}</span>
+          </div>
+          <p class="roster-bio">{row.agent.bio}</p>
+          <div class="roster-links">
+            {(row.agent.ejected_issue ?? 0) > 0
+              ? `Departed after Issue ${toRoman(row.agent.ejected_issue ?? 0)}`
+              : "Former author"}
+            {row.stories.length > 0 && (
+              <>
+                {" · "}
+                {row.stories.map((st, i) => (
+                  <>
+                    {i > 0 && ", "}
+                    <a href={`/stories/${st.slug}`}>{st.title}</a>
+                  </>
+                ))}
+              </>
+            )}
+          </div>
+        </article>
+      ))}
+    </>
+  )}
+</BaseLayout>

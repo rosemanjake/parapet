@@ -1,0 +1,133 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import {
+  formatScore,
+  getPublishedStorySummaries,
+  storyAvgRank,
+  storyScore,
+  toRoman,
+} from "../lib/data";
+
+if (import.meta.env.PROD) {
+  Astro.response.headers.set(
+    "Cache-Control",
+    "public, max-age=60, s-maxage=120, stale-while-revalidate=300",
+  );
+}
+
+const sort =
+  Astro.url.searchParams.get("sort") === "rating" ? "rating" : "latest";
+const limitParam = Number(Astro.url.searchParams.get("limit") || "20");
+const limit =
+  Number.isFinite(limitParam) && limitParam > 0
+    ? Math.min(limitParam, 200)
+    : 20;
+
+const stories = await getPublishedStorySummaries();
+
+const sorted = [...stories].sort((a, b) => {
+  if (sort === "rating") {
+    const sa = storyScore(a) ?? -1;
+    const sb = storyScore(b) ?? -1;
+    if (sb !== sa) return sb - sa;
+    const ra = storyAvgRank(a);
+    const rb = storyAvgRank(b);
+    if (ra !== rb) return ra - rb;
+  }
+  if (b.issue_number !== a.issue_number) return b.issue_number - a.issue_number;
+  return (storyScore(b) ?? -1) - (storyScore(a) ?? -1);
+});
+
+const visible = sorted.slice(0, limit);
+const hasMore = sorted.length > visible.length;
+const latestIssue =
+  stories.length > 0 ? Math.max(...stories.map((s) => s.issue_number)) : 0;
+---
+
+<BaseLayout activeNav="fiction">
+  {visible.length === 0 ? (
+    <p class="empty-note">Issue I is in preparation.</p>
+  ) : (
+    <>
+      <div class="toolbar">
+        <div class="toolbar-heading">
+          {sort === "rating"
+            ? "By Rating"
+            : `Through Issue ${toRoman(latestIssue)}`}
+        </div>
+        <div class="sort-links" aria-label="Sort fiction">
+          <a href="/" class={sort === "latest" ? "active" : ""}>
+            Latest
+          </a>
+          <a href="/?sort=rating" class={sort === "rating" ? "active" : ""}>
+            Highest Rated
+          </a>
+        </div>
+      </div>
+
+      <ul class="toc-list">
+        {visible.map((story) => {
+          const score = storyScore(story);
+          const blurb = story.synopsis || story.epigraph;
+          return (
+            <li class="toc-item">
+              <div class={story.image_url ? "toc-with-thumb" : ""}>
+                {story.image_url && (
+                  <a
+                    href={`/stories/${story.slug}`}
+                    class="toc-thumb-link"
+                    aria-hidden="true"
+                    tabindex="-1"
+                  >
+                    <img
+                      src={story.image_url}
+                      alt=""
+                      class="toc-thumb"
+                      loading="lazy"
+                      decoding="async"
+                    />
+                  </a>
+                )}
+                <div class="toc-content">
+                  <div class="toc-row">
+                    <a class="toc-title" href={`/stories/${story.slug}`}>
+                      {story.title}
+                    </a>
+                    {score !== null && (
+                      <a
+                        class="toc-score"
+                        href={`/reviews#${story.slug}`}
+                        title="Read reviews"
+                      >
+                        {formatScore(score)} / 4
+                      </a>
+                    )}
+                  </div>
+                  <div class="toc-meta">
+                    {story.author_name} &middot; {story.genre} &middot; Issue{" "}
+                    {toRoman(story.issue_number)}
+                  </div>
+                  {blurb && <p class="toc-epigraph">{blurb}</p>}
+                </div>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+
+      {hasMore && (
+        <p class="empty-note" style="padding: 1.75rem 0 0;">
+          <a
+            href={
+              sort === "rating"
+                ? `/?sort=rating&limit=${limit + 20}`
+                : `/?limit=${limit + 20}`
+            }
+          >
+            Show earlier pieces
+          </a>
+        </p>
+      )}
+    </>
+  )}
+</BaseLayout>

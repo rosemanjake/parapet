@@ -1,0 +1,203 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import {
+  formatDate,
+  formatScore,
+  getStoryBySlug,
+  isSceneBreak,
+  renderInline,
+  splitParagraphs,
+  storyScore,
+  toRoman,
+} from "../../lib/data";
+
+const slug = Astro.params.slug ?? "";
+const story = await getStoryBySlug(slug);
+
+if (!story || story.status !== "published") {
+  Astro.response.status = 404;
+}
+
+if (import.meta.env.PROD && story && story.status === "published") {
+  Astro.response.headers.set(
+    "Cache-Control",
+    "public, max-age=120, s-maxage=300, stale-while-revalidate=600",
+  );
+}
+
+const paragraphs = story
+  ? splitParagraphs(story.final_text || story.draft_v1)
+  : [];
+const draftParagraphs = story ? splitParagraphs(story.draft_v1) : [];
+const reviews = story
+  ? [...(story.reviews ?? [])].sort((a, b) =>
+      a.critic_name.localeCompare(b.critic_name),
+    )
+  : [];
+const comments = story?.salon_comments ?? [];
+const score = story ? storyScore(story) : null;
+const synopsis = story?.synopsis || story?.epigraph || "";
+const hasWorkshop = Boolean(story?.editor_notes || story?.author_revision_note);
+
+// Find first prose paragraph eligible for a drop cap (skip scene breaks and opening quotation marks).
+const firstProseIdx = paragraphs.findIndex((p) => !isSceneBreak(p));
+const useDropCap =
+  firstProseIdx >= 0 &&
+  !/^["'“‘\u2018\u201C]/.test(paragraphs[firstProseIdx].trim());
+---
+
+<BaseLayout title={story?.title ?? "Not Found"} activeNav="fiction">
+  {!story || story.status !== "published" ? (
+    <div class="empty-note">
+      <p>This piece could not be found.</p>
+      <p>
+        <a href="/">Return to Parapet</a>
+      </p>
+    </div>
+  ) : (
+    <>
+      <article>
+        <header class="story-header">
+          <div class="eyebrow">
+            Issue {toRoman(story.issue_number)} &middot; {story.genre}
+          </div>
+          <h1 class="story-title">{story.title}</h1>
+          <div class="story-byline">
+            {story.author_name}
+            {story.published_at && (
+              <> &middot; {formatDate(story.published_at)}</>
+            )}
+          </div>
+          {synopsis && <p class="story-synopsis">{synopsis}</p>}
+        </header>
+
+        {story.image_url && (
+          <figure class="story-hero-wrap">
+            <img
+              src={story.image_url}
+              alt={story.title}
+              class="story-hero"
+              decoding="async"
+            />
+          </figure>
+        )}
+
+        <div class="prose">
+          {paragraphs.map((p, idx) =>
+            isSceneBreak(p) ? (
+              <div class="scene-break" aria-hidden="true">
+                * * *
+              </div>
+            ) : (
+              <p
+                class={useDropCap && idx === firstProseIdx ? "first-para" : ""}
+                set:html={renderInline(p)}
+              />
+            ),
+          )}
+        </div>
+
+        <div class="end-mark" aria-hidden="true">
+          &#9632;
+        </div>
+      </article>
+
+      <section class="apparatus">
+        {reviews.length > 0 && (
+          <details class="quiet-details">
+            <summary>
+              Reviews ({reviews.length}) &middot; {formatScore(score)} / 4
+            </summary>
+            <div class="details-body">
+              {reviews.map((rev) => (
+                <div class="entry-card">
+                  <div class="entry-head">
+                    <span class="entry-author">{rev.critic_name}</span>
+                    <span
+                      class={`verdict verdict-${rev.verdict.toLowerCase()}`}
+                    >
+                      {rev.verdict}
+                    </span>
+                  </div>
+                  <div class="entry-body">
+                    {splitParagraphs(rev.body).map((p) => (
+                      <p set:html={renderInline(p)} />
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </details>
+        )}
+
+        {comments.length > 0 && (
+          <details class="quiet-details">
+            <summary>Salon ({comments.length})</summary>
+            <div class="details-body">
+              {comments.map((c) => (
+                <div class="entry-card">
+                  <div class="entry-head">
+                    <span class="entry-author">{c.author_name}</span>
+                  </div>
+                  <div class="entry-body">
+                    {splitParagraphs(c.body).map((p) => (
+                      <p set:html={renderInline(p)} />
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </details>
+        )}
+
+        {hasWorkshop && (
+          <details class="quiet-details">
+            <summary>Workshop Notes</summary>
+            <div class="details-body">
+              {story.editor_notes && (
+                <div class="entry-card">
+                  <div class="entry-head">
+                    <span class="entry-author">{story.editor_name}</span>
+                  </div>
+                  <div class="entry-body">
+                    {splitParagraphs(story.editor_notes).map((p) => (
+                      <p set:html={renderInline(p)} />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {story.author_revision_note && (
+                <div class="entry-card">
+                  <div class="entry-head">
+                    <span class="entry-author">{story.author_name}</span>
+                  </div>
+                  <div class="entry-body">
+                    {splitParagraphs(story.author_revision_note).map((p) => (
+                      <p set:html={renderInline(p)} />
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </details>
+        )}
+
+        {draftParagraphs.length > 0 && (
+          <details class="quiet-details">
+            <summary>First Draft</summary>
+            <div class="draft-box">
+              {draftParagraphs.map((p) =>
+                isSceneBreak(p) ? (
+                  <div class="scene-break">* * *</div>
+                ) : (
+                  <p set:html={renderInline(p)} />
+                ),
+              )}
+            </div>
+          </details>
+        )}
+      </section>
+    </>
+  )}
+</BaseLayout>

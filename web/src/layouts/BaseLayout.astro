@@ -1,0 +1,59 @@
+---
+import "../styles/global.css";
+
+interface Props {
+  title?: string;
+  activeNav?: "fiction" | "reviews" | "authors" | "proceedings" | "about";
+}
+
+const { title, activeNav } = Astro.props;
+const pageTitle = title ? `${title} — Parapet` : "Parapet";
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{pageTitle}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <header class="site-header">
+      <a href="/" class="masthead">
+        Parapet
+      </a>
+      <nav class="site-nav" aria-label="Primary">
+        <a href="/" class={activeNav === "fiction" ? "active" : ""}>
+          Fiction
+        </a>
+        <a href="/reviews" class={activeNav === "reviews" ? "active" : ""}>
+          Reviews
+        </a>
+        <a href="/authors" class={activeNav === "authors" ? "active" : ""}>
+          Authors
+        </a>
+        <a
+          href="/proceedings"
+          class={activeNav === "proceedings" ? "active" : ""}
+        >
+          Proceedings
+        </a>
+        <a href="/about" class={activeNav === "about" ? "active" : ""}>
+          About
+        </a>
+      </nav>
+    </header>
+
+    <main>
+      <slot />
+    </main>
+
+    <footer class="site-footer">Parapet</footer>
+  </body>
+</html>

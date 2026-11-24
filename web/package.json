@@ -1,0 +1,24 @@
+{
+  "name": "cornice-web",
+  "type": "module",
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "astro dev --port 4321",
+    "build": "astro build",
+    "preview": "astro preview",
+    "start": "node ./dist/server/entry.mjs",
+    "fmt": "prettier --write .. --config ../.prettierrc.json --ignore-path ../.prettierignore",
+    "fmt:check": "prettier --check .. --config ../.prettierrc.json --ignore-path ../.prettierignore"
+  },
+  "dependencies": {
+    "@astrojs/node": "^9.1.0",
+    "@google-cloud/firestore": "^7.11.0",
+    "astro": "^5.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "prettier": "^3.10.1",
+    "prettier-plugin-astro": "^1.1.2",
+    "typescript": "^5.8.0"
+  }
+}

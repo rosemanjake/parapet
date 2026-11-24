@@ -1,0 +1,146 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import {
+  formatScore,
+  getReviewedStories,
+  renderInline,
+  splitParagraphs,
+  storyAvgRank,
+  storyScore,
+  toRoman,
+} from "../lib/data";
+
+if (import.meta.env.PROD) {
+  Astro.response.headers.set(
+    "Cache-Control",
+    "public, max-age=60, s-maxage=120, stale-while-revalidate=300",
+  );
+}
+
+const sort =
+  Astro.url.searchParams.get("sort") === "rating" ? "rating" : "latest";
+const limitParam = Number(Astro.url.searchParams.get("limit") || "20");
+const limit =
+  Number.isFinite(limitParam) && limitParam > 0
+    ? Math.min(limitParam, 100)
+    : 20;
+
+const stories = await getReviewedStories();
+
+const sorted = [...stories].sort((a, b) => {
+  if (sort === "rating") {
+    const sa = storyScore(a) ?? -1;
+    const sb = storyScore(b) ?? -1;
+    if (sb !== sa) return sb - sa;
+    return storyAvgRank(a) - storyAvgRank(b);
+  }
+  if (b.issue_number !== a.issue_number) return b.issue_number - a.issue_number;
+  return (storyScore(b) ?? -1) - (storyScore(a) ?? -1);
+});
+
+const visible = sorted.slice(0, limit);
+const hasMore = sorted.length > visible.length;
+---
+
+<BaseLayout title="Reviews" activeNav="reviews">
+  {visible.length === 0 ? (
+    <p class="empty-note">No reviews have been published yet.</p>
+  ) : (
+    <>
+      <div class="toolbar">
+        <div class="toolbar-heading">
+          {sort === "rating" ? "By Rating" : "Latest"}
+        </div>
+        <div class="sort-links" aria-label="Sort reviews">
+          <a href="/reviews" class={sort === "latest" ? "active" : ""}>
+            Latest
+          </a>
+          <a
+            href="/reviews?sort=rating"
+            class={sort === "rating" ? "active" : ""}
+          >
+            Highest Rated
+          </a>
+        </div>
+      </div>
+
+      {visible.map((story) => {
+        const score = storyScore(story);
+        const reviews = [...(story.reviews ?? [])].sort((a, b) =>
+          a.critic_name.localeCompare(b.critic_name),
+        );
+        const comments = story.salon_comments ?? [];
+        return (
+          <section class="review-group" id={story.slug}>
+            <div class="review-group-head">
+              <div>
+                <a class="review-story-title" href={`/stories/${story.slug}`}>
+                  {story.title}
+                </a>
+                <div class="toc-meta">
+                  {story.author_name} &middot; Issue{" "}
+                  {toRoman(story.issue_number)}
+                </div>
+              </div>
+              <div class="toc-score">{formatScore(score)} / 4</div>
+            </div>
+
+            <div class="review-list">
+              {reviews.map((rev) => (
+                <details class="review-row">
+                  <summary class="review-row-summary">
+                    <span class="review-row-critic">{rev.critic_name}</span>
+                    <span
+                      class={`verdict verdict-${rev.verdict.toLowerCase()}`}
+                    >
+                      {rev.verdict}
+                    </span>
+                  </summary>
+                  <div class="review-row-body entry-body">
+                    {splitParagraphs(rev.body).map((p) => (
+                      <p set:html={renderInline(p)} />
+                    ))}
+                  </div>
+                </details>
+              ))}
+            </div>
+
+            {comments.length > 0 && (
+              <details class="quiet-details review-salon">
+                <summary>Salon ({comments.length})</summary>
+                <div class="details-body">
+                  {comments.map((c) => (
+                    <div class="entry-card">
+                      <div class="entry-head">
+                        <span class="entry-author">{c.author_name}</span>
+                      </div>
+                      <div class="entry-body">
+                        {splitParagraphs(c.body).map((p) => (
+                          <p set:html={renderInline(p)} />
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
+          </section>
+        );
+      })}
+
+      {hasMore && (
+        <p class="empty-note" style="padding: 1.75rem 0 0;">
+          <a
+            href={
+              sort === "rating"
+                ? `/reviews?sort=rating&limit=${limit + 20}`
+                : `/reviews?limit=${limit + 20}`
+            }
+          >
+            Show earlier reviews
+          </a>
+        </p>
+      )}
+    </>
+  )}
+</BaseLayout>

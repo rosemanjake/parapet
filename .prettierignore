@@ -1,0 +1,7 @@
+.DS_Store
+data/
+backend/bin/
+web/dist/
+web/.astro/
+web/node_modules/
+web/package-lock.json
